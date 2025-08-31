@@ -1,0 +1,28 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")    # NEED TO CHANGE EVERY TIME I RUN LOCALLY AGAIN
+ACCOUNT_ADDRESS = os.getenv("ACCOUNT_ADDRESS")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+WEB3_PROVIDER_URL = os.getenv("WEB3_PROVIDER_URL")
+
+# Load environment variables
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
+
+AZURE_CONN_STRING = os.getenv("AZURE_CONN_STRING")
+AZURE_CONTAINER = os.getenv("AZURE_CONTAINER")
+
+# IPFS_API_URL = os.getenv("IPFS_API_URL")
+# IPFS_PROJECT_ID = os.getenv("IPFS_PROJECT_ID")
+# IPFS_PROJECT_SECRET = os.getenv("IPFS_PROJECT_SECRET")
+
+# PINATA_API_KEY = os.getenv("PINATA_API_KEY")
+# PINATA_SECRET_API_KEY = os.getenv("PINATA_SECRET_API_KEY")
+# PINATA_JWT = os.getenv("PINATA_JWT")
+
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME")
