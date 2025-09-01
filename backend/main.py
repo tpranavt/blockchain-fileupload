@@ -1,128 +1,79 @@
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
+from datetime import datetime
+import hashlib
 import os
 import tempfile
-import hashlib
-import logging
-from typing import List, Optional
-
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
-from azure.storage.blob import BlobServiceClient, BlobClient
-
-import aiofiles
 import asyncio
 
 from db import file_events_collection
+from blockchain import log_file_on_chain, w3
 
-from config import (
-    AWS_S3_BUCKET,
-    AWS_ACCESS_KEY,
-    AWS_SECRET_KEY,
-    AZURE_CONN_STRING,
-    AZURE_CONTAINER,
-)
-
-from blockchain import log_file_on_chain
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import boto3
+from botocore.exceptions import ClientError
+from azure.storage.blob import BlobServiceClient, BlobClient
+import aiofiles
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # adjust as needed
+    allow_origins=["http://localhost:3000"],  # your React frontend origin
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize AWS S3 client
+# Initialize AWS and Azure clients with environment variables set
 s3_client = boto3.client(
     "s3",
-    aws_access_key_id=AWS_ACCESS_KEY,
-    aws_secret_access_key=AWS_SECRET_KEY,
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_KEY"),
 )
+blob_service_client = BlobServiceClient.from_connection_string(os.getenv("AZURE_CONN_STRING"))
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+AZURE_CONTAINER = os.getenv("AZURE_CONTAINER")
 
-# Initialize Azure Blob client
-blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONN_STRING)
+
+@app.post("/check-file-name")
+async def check_file_name(request: Request):
+    data = await request.json()
+    filename = data.get("filename")
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename not provided")
+    records = await file_events_collection.find({"filename": filename}).to_list(length=100)
+    hashes = [record["file_hash"] for record in records]
+    return {"exists": len(records) > 0, "hashes": hashes}
 
 
 async def upload_to_s3(file_path: str, filename: str) -> str:
     try:
         s3_key = f"uploads/{filename}"
+        try:
+            s3_client.head_object(Bucket=AWS_S3_BUCKET, Key=s3_key)
+            raise RuntimeError("File with this name already exists on S3")
+        except ClientError:
+            pass  # Not found, so safe to upload
+
         s3_client.upload_file(file_path, AWS_S3_BUCKET, s3_key)
-        url = f"https://{AWS_S3_BUCKET}.s3.amazonaws.com/{s3_key}"
-        logger.info(f"S3 upload successful for {filename} -> {url}")
-        return url
-    except (BotoCoreError, ClientError) as e:
-        logger.error(f"S3 upload failed for {filename}: {e}")
+        return f"https://{AWS_S3_BUCKET}.s3.amazonaws.com/{s3_key}"
+    except Exception as e:
         raise RuntimeError(f"S3 upload failed: {e}")
 
 
 async def upload_to_azure(file_path: str, filename: str) -> str:
     try:
-        blob_client: BlobClient = blob_service_client.get_blob_client(
-            container=AZURE_CONTAINER, blob=filename
-        )
-        async with aiofiles.open(file_path, "rb") as data:
-            content = await data.read()
-        blob_client.upload_blob(content, overwrite=True)
-        url = f"https://{blob_client.account_name}.blob.core.windows.net/{AZURE_CONTAINER}/{filename}"
-        logger.info(f"Azure upload successful for {filename} -> {url}")
-        return url
+        blob_client: BlobClient = blob_service_client.get_blob_client(container=AZURE_CONTAINER, blob=filename)
+        if blob_client.exists():
+            raise RuntimeError("File with this name already exists on Azure")
+
+        async with aiofiles.open(file_path, "rb") as f:
+            content = await f.read()
+        blob_client.upload_blob(content)
+        return f"https://{blob_client.account_name}.blob.core.windows.net/{AZURE_CONTAINER}/{filename}"
     except Exception as e:
-        logger.error(f"Azure Blob upload failed for {filename}: {e}")
         raise RuntimeError(f"Azure Blob upload failed: {e}")
-
-
-# async def upload_to_ipfs(file_path: str) -> str:
-#     headers = {
-#         "pinata_api_key": PINATA_API_KEY,
-#         "pinata_secret_api_key": PINATA_SECRET_API_KEY,
-#     }
-#     try:
-#         async with aiohttp.ClientSession() as session:
-#             form = aiohttp.FormData()
-#             async with aiofiles.open(file_path, "rb") as f:
-#                 data = await f.read()
-#                 form.add_field("file", data, filename=os.path.basename(file_path))
-#             async with session.post(
-#                 "https://api.pinata.cloud/pinning/pinFileToIPFS",
-#                 data=form,
-#                 headers=headers
-#             ) as resp:
-#                 resp.raise_for_status()
-#                 response_json = await resp.json()
-#                 cid = response_json["IpfsHash"]
-#                 logger.info(f"Pinata IPFS upload successful: {cid}")
-#                 return cid
-#     except Exception as e:
-#         logger.error(f"Pinata IPFS upload failed for {file_path}: {e}")
-#         raise RuntimeError(f"Pinata IPFS upload failed: {e}")
-
-@app.post("/verify")
-async def verify_file(file: UploadFile = File(...)):
-    contents = await file.read()  # read once
-    file_hash = hashlib.sha256(contents).hexdigest().lower()
-    # In your verify endpoint, after computing the hash
-    logger.info(f"Verify file {file.filename} with hash: {file_hash}")
-    record = await file_events_collection.find_one({"file_hash": file_hash})
-    if not record:
-        raise HTTPException(status_code=404, detail="File hash not found on blockchain")
-
-    return {
-        "verified": True,
-        "file_hash": file_hash,
-        "filename": record.get("filename"),
-        # "uploaded_by": record.get("uploader"),
-        "storage": record.get("storage"),
-        "upload_time": record.get("timestamp"),
-        "txn_hash": record.get("txn_hash"),
-    }
 
 
 @app.post("/upload")
@@ -130,15 +81,14 @@ async def upload_files(
     files: List[UploadFile] = File(...),
     upload_s3: Optional[bool] = Form(False),
     upload_azure: Optional[bool] = Form(False),
-    # uploader: Optional[str] = Form(None),  # Optionally pass uploader identity (address or username)
+    uploader: Optional[str] = Form(None),
 ):
-    if not any([upload_s3, upload_azure]):
-        raise HTTPException(status_code=400, detail="At least one storage option must be selected.")
+    if not (upload_s3 or upload_azure):
+        raise HTTPException(status_code=400, detail="At least one storage option must be selected")
 
     responses = []
 
     for file in files:
-        logger.info(f"Processing file: {file.filename}")
         contents = await file.read()
         file_hash_hex = hashlib.sha256(contents).hexdigest().lower()
         file_hash_bytes32 = bytes.fromhex(file_hash_hex)
@@ -149,82 +99,46 @@ async def upload_files(
 
         upload_results = {}
         storage_names = []
-        # blockchain_receipts = {}
+        blockchain_receipt = None
 
         try:
             if upload_s3:
                 try:
-                    # receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "S3")
                     s3_url = await upload_to_s3(temp_path, file.filename)
                     upload_results["s3"] = s3_url
                     storage_names.append("S3")
-                    # blockchain_receipts["s3"] = receipt.transactionHash.hex()
-
-                    # Store metadata to MongoDB off-chain, including filename, uploader, timestamp, txn hash
-                    # await file_events_collection.update_one(
-                    #     {"file_hash": file_hash_hex},
-                    #     {
-                    #         "$set": {
-                    #             "filename": file.filename,
-                    #             # "uploader": uploader or "unknown",
-                    #             "storage": "S3",
-                    #             "timestamp": receipt.blockNumber,  # blockNumber to avoid subtle clock mismatches; alternatively, query block timestamp off-chain
-                    #             "txn_hash": receipt.transactionHash.hex(),
-                    #         }
-                    #     },
-                    #     upsert=True,
-                    # )
                 except Exception as e:
                     upload_results["s3_error"] = str(e)
 
             if upload_azure:
                 try:
                     azure_url = await upload_to_azure(temp_path, file.filename)
-                    # receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "Azure")
                     upload_results["azure"] = azure_url
                     storage_names.append("Azure")
-                    # blockchain_receipts["azure"] = receipt.transactionHash.hex()
-
-                    # await file_events_collection.update_one(
-                    #     {"file_hash": file_hash_hex},
-                    #     {
-                    #         "$set": {
-                    #             "filename": file.filename,
-                    #             # "uploader": uploader or "unknown",
-                    #             "storage": "Azure",
-                    #             "timestamp": receipt.blockNumber,
-                    #             "txn_hash": receipt.transactionHash.hex(),
-                    #         }
-                    #     },
-                    #     upsert=True,
-                    # )
                 except Exception as e:
                     upload_results["azure_error"] = str(e)
-            if storage_names:
-                # Join storage names with commas
-                storage_csv = ",".join(storage_names)
 
-                # Log on chain once for all storages
-                receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, storage_csv)
+            if not storage_names:
+                return HTTPException(status_code=400, detail=f"Upload failed for '{file.filename}' on all storages.")
 
-                # Update MongoDB once with all info
-                await file_events_collection.update_one(
-                    {"file_hash": file_hash_hex},
-                    {
-                        "$set": {
-                            "filename": file.filename,
-                            # "uploader": uploader or "unknown",
-                            "storage": storage_csv,  # store as list for ease of access
-                            "timestamp": receipt.blockNumber,
-                            "txn_hash": receipt.transactionHash.hex(),
-                        }
-                    },
-                    upsert=True,
-                )
-            else:
-                # If no upload succeeded, respond accordingly
-                raise HTTPException(status_code=500, detail="File upload to selected storages failed.")
-
+            storage_csv = ",".join(storage_names)
+            receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, storage_csv)
+            blockchain_receipt = receipt.transactionHash.hex()
+            block = w3.eth.get_block(receipt.blockNumber)
+            block_timestamp = block.timestamp
+            await file_events_collection.update_one(
+                {"file_hash": file_hash_hex},
+                {
+                    "$set": {
+                        "filename": file.filename,
+                        "uploader": uploader or "unknown",
+                        "storage": storage_names,  # store as list, not CSV string
+                        "timestamp": block_timestamp,
+                        "txn_hash": blockchain_receipt,
+                    }
+                },
+                upsert=True,
+            )
         finally:
             os.unlink(temp_path)
 
@@ -232,8 +146,26 @@ async def upload_files(
             "file_name": file.filename,
             "sha256": file_hash_hex,
             "upload_results": upload_results,
-            "blockchain_receipts": receipt.transactionHash.hex(),
-            "storages": storage_csv
+            "blockchain_receipt": blockchain_receipt,
         })
 
     return responses
+
+
+@app.post("/verify")
+async def verify_file(file: UploadFile = File(...)):
+    contents = await file.read()
+    file_hash = hashlib.sha256(contents).hexdigest().lower()
+    record = await file_events_collection.find_one({"file_hash": file_hash})
+    if not record:
+        raise HTTPException(status_code=404, detail="File hash not found on blockchain")
+
+    return {
+        "verified": True,
+        "file_hash": file_hash,
+        "filename": record.get("filename"),
+        "uploaded_by": record.get("uploader"),
+        "storage": record.get("storage"),
+        "upload_time": record.get("timestamp"),
+        "txn_hash": record.get("txn_hash"),
+    }
