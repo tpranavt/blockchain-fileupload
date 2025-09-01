@@ -1,11 +1,3 @@
-<img src="https://r2cdn.perplexity.ai/pplx-full-logo-primary-dark%402x.png" style="height:64px;margin-right:32px"/>
-
-# give me readme.md  including these diagrams with descriptions and explanations.
-
-Here is a comprehensive **README.md** for your blockchain file upload project including the Mermaid diagrams with detailed descriptions and system explanations:
-
-***
-
 # Blockchain File Upload - Secure Multi-Cloud Storage with Immutable Audit Trail
 
 ## Project Overview
