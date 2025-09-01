@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")    # NEED TO CHANGE EVERY TIME I RUN LOCALLY AGAIN
-ACCOUNT_ADDRESS = os.getenv("ACCOUNT_ADDRESS")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 WEB3_PROVIDER_URL = os.getenv("WEB3_PROVIDER_URL")
 

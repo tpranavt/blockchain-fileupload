@@ -4,17 +4,15 @@ import hashlib
 import logging
 from typing import List, Optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, APIRouter
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from azure.storage.blob import BlobServiceClient, BlobClient
 
-import aiohttp
 import aiofiles
 import asyncio
-
 
 from db import file_events_collection
 
@@ -132,6 +130,7 @@ async def upload_files(
     files: List[UploadFile] = File(...),
     upload_s3: Optional[bool] = Form(False),
     upload_azure: Optional[bool] = Form(False),
+    uploader: Optional[str] = Form(None),  # Optionally pass uploader identity (address or username)
 ):
     if not any([upload_s3, upload_azure]):
         raise HTTPException(status_code=400, detail="At least one storage option must be selected.")
@@ -140,10 +139,10 @@ async def upload_files(
 
     for file in files:
         logger.info(f"Processing file: {file.filename}")
-        contents = await file.read()  # read once
-        file_hash = hashlib.sha256(contents).hexdigest().lower()
-        # In your upload endpoint, after computing the hash
-        logger.info(f"Upload file {file.filename} with hash: {file_hash}")
+        contents = await file.read()
+        file_hash_hex = hashlib.sha256(contents).hexdigest().lower()
+        file_hash_bytes32 = bytes.fromhex(file_hash_hex)
+
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(contents)
             temp_path = tmp.name
@@ -154,28 +153,57 @@ async def upload_files(
         try:
             if upload_s3:
                 try:
-                    receipt = await asyncio.to_thread(log_file_on_chain, file_hash, "S3")
+                    receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "S3")
                     s3_url = await upload_to_s3(temp_path, file.filename)
                     upload_results["s3"] = s3_url
-                    
                     blockchain_receipts["s3"] = receipt.transactionHash.hex()
+
+                    # Store metadata to MongoDB off-chain, including filename, uploader, timestamp, txn hash
+                    await file_events_collection.update_one(
+                        {"file_hash": file_hash_hex},
+                        {
+                            "$set": {
+                                "filename": file.filename,
+                                "uploader": uploader or "unknown",
+                                "storage": "S3",
+                                "timestamp": receipt.blockNumber,  # blockNumber to avoid subtle clock mismatches; alternatively, query block timestamp off-chain
+                                "txn_hash": receipt.transactionHash.hex(),
+                            }
+                        },
+                        upsert=True,
+                    )
                 except Exception as e:
                     upload_results["s3_error"] = str(e)
 
             if upload_azure:
                 try:
                     azure_url = await upload_to_azure(temp_path, file.filename)
+                    receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "Azure")
                     upload_results["azure"] = azure_url
-                    receipt = await asyncio.to_thread(log_file_on_chain, file_hash, "Azure")
                     blockchain_receipts["azure"] = receipt.transactionHash.hex()
+
+                    await file_events_collection.update_one(
+                        {"file_hash": file_hash_hex},
+                        {
+                            "$set": {
+                                "filename": file.filename,
+                                "uploader": uploader or "unknown",
+                                "storage": "Azure",
+                                "timestamp": receipt.blockNumber,
+                                "txn_hash": receipt.transactionHash.hex(),
+                            }
+                        },
+                        upsert=True,
+                    )
                 except Exception as e:
                     upload_results["azure_error"] = str(e)
+
         finally:
             os.unlink(temp_path)
 
         responses.append({
             "file_name": file.filename,
-            "sha256": file_hash,
+            "sha256": file_hash_hex,
             "upload_results": upload_results,
             "blockchain_receipts": blockchain_receipts,
         })

@@ -44,25 +44,18 @@ async def save_event_to_db(doc):
 def handle_event(event):
     try:
         raw_hash = event['args']['fileHash']
-        # If it is bytes, convert to hex string
-        if isinstance(raw_hash, bytes):
-            file_hash_str = raw_hash.hex()
-        else:
-            file_hash_str = raw_hash  # assume already string
+        file_hash_str = raw_hash.hex().lower() if isinstance(raw_hash, bytes) else raw_hash.lower()
         data = {
-            "file_hash": file_hash_str,  # use the processed string
-            "filename": "unknown",  # not provided in event, default
-            "uploader": event['args']['uploader'],
-            "storage": event['args']['storageType'],  # correct key from ABI
+            "file_hash": file_hash_str,
+            "storage": event['args']['storageType'],
             "timestamp": datetime.fromtimestamp(event['args']['timestamp'], tz=timezone.utc),
             "txn_hash": event['transactionHash'].hex(),
         }
-        file_event = FileEvent(**data)
-        doc = file_event.model_dump()
-        # Schedule the async DB update in the event loop
-        asyncio.get_event_loop().create_task(save_event_to_db(doc))
+        # You can log or update MongoDB here for verification or redundancy
+        logger.info(f"Event received for file_hash: {file_hash_str}, txn: {data['txn_hash']}")
     except Exception as e:
-        logger.error(f"Failed to handle event data: {e}", exc_info=True)
+        logger.error(f"Failed to handle event: {e}")
+
 
 async def log_loop():
     event_filter = contract.events.FileUploaded.create_filter(from_block="latest")
