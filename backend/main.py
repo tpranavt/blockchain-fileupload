@@ -118,7 +118,7 @@ async def verify_file(file: UploadFile = File(...)):
         "verified": True,
         "file_hash": file_hash,
         "filename": record.get("filename"),
-        "uploaded_by": record.get("uploader"),
+        # "uploaded_by": record.get("uploader"),
         "storage": record.get("storage"),
         "upload_time": record.get("timestamp"),
         "txn_hash": record.get("txn_hash"),
@@ -130,7 +130,7 @@ async def upload_files(
     files: List[UploadFile] = File(...),
     upload_s3: Optional[bool] = Form(False),
     upload_azure: Optional[bool] = Form(False),
-    uploader: Optional[str] = Form(None),  # Optionally pass uploader identity (address or username)
+    # uploader: Optional[str] = Form(None),  # Optionally pass uploader identity (address or username)
 ):
     if not any([upload_s3, upload_azure]):
         raise HTTPException(status_code=400, detail="At least one storage option must be selected.")
@@ -148,55 +148,82 @@ async def upload_files(
             temp_path = tmp.name
 
         upload_results = {}
-        blockchain_receipts = {}
+        storage_names = []
+        # blockchain_receipts = {}
 
         try:
             if upload_s3:
                 try:
-                    receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "S3")
+                    # receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "S3")
                     s3_url = await upload_to_s3(temp_path, file.filename)
                     upload_results["s3"] = s3_url
-                    blockchain_receipts["s3"] = receipt.transactionHash.hex()
+                    storage_names.append("S3")
+                    # blockchain_receipts["s3"] = receipt.transactionHash.hex()
 
                     # Store metadata to MongoDB off-chain, including filename, uploader, timestamp, txn hash
-                    await file_events_collection.update_one(
-                        {"file_hash": file_hash_hex},
-                        {
-                            "$set": {
-                                "filename": file.filename,
-                                "uploader": uploader or "unknown",
-                                "storage": "S3",
-                                "timestamp": receipt.blockNumber,  # blockNumber to avoid subtle clock mismatches; alternatively, query block timestamp off-chain
-                                "txn_hash": receipt.transactionHash.hex(),
-                            }
-                        },
-                        upsert=True,
-                    )
+                    # await file_events_collection.update_one(
+                    #     {"file_hash": file_hash_hex},
+                    #     {
+                    #         "$set": {
+                    #             "filename": file.filename,
+                    #             # "uploader": uploader or "unknown",
+                    #             "storage": "S3",
+                    #             "timestamp": receipt.blockNumber,  # blockNumber to avoid subtle clock mismatches; alternatively, query block timestamp off-chain
+                    #             "txn_hash": receipt.transactionHash.hex(),
+                    #         }
+                    #     },
+                    #     upsert=True,
+                    # )
                 except Exception as e:
                     upload_results["s3_error"] = str(e)
 
             if upload_azure:
                 try:
                     azure_url = await upload_to_azure(temp_path, file.filename)
-                    receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "Azure")
+                    # receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, "Azure")
                     upload_results["azure"] = azure_url
-                    blockchain_receipts["azure"] = receipt.transactionHash.hex()
+                    storage_names.append("Azure")
+                    # blockchain_receipts["azure"] = receipt.transactionHash.hex()
 
-                    await file_events_collection.update_one(
-                        {"file_hash": file_hash_hex},
-                        {
-                            "$set": {
-                                "filename": file.filename,
-                                "uploader": uploader or "unknown",
-                                "storage": "Azure",
-                                "timestamp": receipt.blockNumber,
-                                "txn_hash": receipt.transactionHash.hex(),
-                            }
-                        },
-                        upsert=True,
-                    )
+                    # await file_events_collection.update_one(
+                    #     {"file_hash": file_hash_hex},
+                    #     {
+                    #         "$set": {
+                    #             "filename": file.filename,
+                    #             # "uploader": uploader or "unknown",
+                    #             "storage": "Azure",
+                    #             "timestamp": receipt.blockNumber,
+                    #             "txn_hash": receipt.transactionHash.hex(),
+                    #         }
+                    #     },
+                    #     upsert=True,
+                    # )
                 except Exception as e:
                     upload_results["azure_error"] = str(e)
+            if storage_names:
+                # Join storage names with commas
+                storage_csv = ",".join(storage_names)
+
+                # Log on chain once for all storages
+                receipt = await asyncio.to_thread(log_file_on_chain, file_hash_bytes32, storage_csv)
+
+                # Update MongoDB once with all info
+                await file_events_collection.update_one(
+                    {"file_hash": file_hash_hex},
+                    {
+                        "$set": {
+                            "filename": file.filename,
+                            # "uploader": uploader or "unknown",
+                            "storage": storage_csv,  # store as list for ease of access
+                            "timestamp": receipt.blockNumber,
+                            "txn_hash": receipt.transactionHash.hex(),
+                        }
+                    },
+                    upsert=True,
+                )
+            else:
+                # If no upload succeeded, respond accordingly
+                raise HTTPException(status_code=500, detail="File upload to selected storages failed.")
 
         finally:
             os.unlink(temp_path)
@@ -205,7 +232,8 @@ async def upload_files(
             "file_name": file.filename,
             "sha256": file_hash_hex,
             "upload_results": upload_results,
-            "blockchain_receipts": blockchain_receipts,
+            "blockchain_receipts": receipt.transactionHash.hex(),
+            "storages": storage_csv
         })
 
     return responses
